@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<title>Teachable Machine + MQTT — Web Diagnostics</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.21.0/dist/tf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@teachablemachine/image@0.8.4/dist/teachablemachine-image.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/paho-mqtt/1.0.1/mqttws31.min.js"></script>
+
+<style>
+:root {--ok:#16a34a;--warn:#eab308;--err:#dc2626;--muted:#6b7280;--bg:#0b1020;--panel:#11172a;--panel-2:#0f1526;--text:#e5e7eb;}
+html,body{height:100%;margin:0;font-family:ui-sans-serif,system-ui;background:radial-gradient(1000px 600px at 10% -20%,#1b2550,var(--bg));color:var(--text);display:flex;flex-direction:column;align-items:center;}
+header{width:100%;max-width:1100px;padding:24px 16px 8px;}
+h1{margin:0 0 8px;font-size:22px;font-weight:700;}
+.sub{color:#9ca3af;font-size:13px;}
+.grid{width:100%;max-width:1100px;display:grid;gap:12px;grid-template-columns:360px 1fr;padding:8px 16px 24px;box-sizing:border-box;}
+@media(max-width:960px){.grid{grid-template-columns:1fr;}}
+.card{background:linear-gradient(180deg,var(--panel),var(--panel-2));border-radius:16px;box-shadow:0 6px 30px rgba(0,0,0,.28);border:1px solid rgba(255,255,255,.06);}
+.card h3{margin:0;padding:14px 16px;font-size:15px;border-bottom:1px solid rgba(255,255,255,.06);color:#cbd5e1;font-weight:600;}
+.card .content{padding:14px 16px 16px;}
+.row{display:flex;align-items:center;gap:10px;margin:8px 0;font-size:14px;}
+.dot{width:10px;height:10px;border-radius:50%;background:var(--muted);box-shadow:0 0 0 2px rgba(0,0,0,.2);}
+.dot.ok{background:var(--ok);}
+.dot.warn{background:var(--warn);}
+.dot.err{background:var(--err);}
+.btns{display:flex;flex-wrap:wrap;gap:8px;}
+button{appearance:none;border:1px solid rgba(255,255,255,.12);background:#111827;color:#fff;padding:9px 14px;font-size:14px;border-radius:10px;cursor:pointer;}
+button:hover{filter:brightness(1.05);}
+.kv{display:grid;grid-template-columns:120px 1fr;gap:8px 12px;font-size:13px;color:#cbd5e1;}
+.kv code{color:#e5e7eb;}
+.log{height:200px;background:#0b1224;border-radius:12px;padding:8px;overflow:auto;font-family:ui-monospace,Menlo,Monaco,Consolas,monospace;font-size:12px;border:1px solid rgba(255,255,255,.06);}
+.pill{display:inline-flex;align-items:center;gap:6px;padding:4px 8px;border-radius:999px;font-size:12px;border:1px solid rgba(255,255,255,.14);}
+.pill.ok{color:#bbf7d0;border-color:#14532d;background:rgba(22,163,74,.15);}
+.pill.err{color:#fecaca;border-color:#7f1d1d;background:rgba(220,38,38,.14);}
+.pill.warn{color:#fde68a;border-color:#78350f;background:rgba(234,179,8,.12);}
+#webcam-container{padding:12px;}
+#webcam-container canvas,video{width:100%;max-width:640px;height:auto;display:block;margin:0 auto;border-radius:12px;border:1px solid rgba(255,255,255,.06);}
+.labels{font-size:13px;display:grid;gap:6px;}
+.labels .bar{background:rgba(255,255,255,.06);border-radius:8px;overflow:hidden;position:relative;}
+.labels .bar>span{display:block;height:22px;padding:0 8px;line-height:22px;}
+.labels .bar::after{content:"";position:absolute;inset:0;width:var(--w,0%);background:linear-gradient(90deg,#2563eb,#4f46e5);opacity:.35;}
+footer{width:100%;max-width:1100px;padding:6px 16px 18px;color:#9ca3af;font-size:12px;}
+.mono{font-family:ui-monospace,Menlo,Monaco,Consolas,monospace;}
+</style>
+</head>
+
+<body>
+<header>
+<h1>Teachable Machine + MQTT — Diagnostics</h1>
+<div class="sub">ยืนยัน: กล้อง, โมเดล, MQTT, Publish/Subscribe พร้อม log แบบเรียลไทม์</div>
+</header>
+
+<div class="grid">
+<section class="card">
+<h3>สถานะระบบ</h3>
+<div class="content">
+<div class="row"><span id="dot-mqtt" class="dot"></span> MQTT: <span id="mqtt-state" class="mono">disconnected</span></div>
+<div class="row"><span id="dot-model" class="dot"></span> Model: <span id="model-state" class="mono">idle</span></div>
+<div class="row"><span id="dot-cam" class="dot"></span> Camera: <span id="cam-state" class="mono">idle</span></div>
+<div class="row"><span id="dot-sub" class="dot"></span> Subscribe: <span id="sub-state" class="mono">not subscribed</span></div>
+<div class="row"><span id="dot-loop" class="dot"></span> Loopback RX: <span id="rx-state" class="mono">no messages</span></div>
+</div>
+</section>
+
+<section class="card">
+<h3>ควบคุม</h3>
+<div class="content">
+<div class="btns">
+<button id="btn-start-back">Start Back Camera</button>
+<button id="btn-start-front">Start Front Camera</button>
+<button id="btn-stop">Stop</button>
+<button id="btn-test-pub">Test Publish</button>
+<button id="btn-clear-log">Clear Log</button>
+</div>
+<div style="height:8px"></div>
+<div class="kv">
+<div>Broker</div><div><code id="cfg-broker">wss://broker.hivemq.com:8884/mqtt</code></div>
+<div>Topic</div><div><code id="cfg-topic">Opzaa1</code></div>
+<div>Client ID</div><div><code id="cfg-client">(will set on connect)</code></div>
+</div>
+</div>
+</section>
+
+<section class="card" style="grid-column:1/-1;">
+<h3>กล้อง & การทำนาย</h3>
+<div class="content">
+<div id="webcam-container"></div>
+<div class="labels" id="label-container"></div>
+</div>
+</section>
+
+<section class="card" style="grid-column:1/-1;">
+<h3>Log แบบเรียลไทม์</h3>
+<div class="content">
+<div class="log" id="log"></div>
+</div>
+</section>
+</div>
+
+<footer>
+<div>จุด <span class="pill ok">MQTT</span> สีเขียวเมื่อ connected, loopback ใช้ตรวจสอบ subscribe สำเร็จ</div>
+</footer>
+
+<script>
+/*********************
+ * CONFIG
+ *********************/
+const TM_URL="https://teachablemachine.withgoogle.com/models/uQFEg8LX0/";
+const MQTT_HOST="broker.hivemq.com";
+const MQTT_PORT=8884;
+const MQTT_PATH="/mqtt";
+const MQTT_TOPIC="Opzaa1";
+const CONF_THRESHOLD=0.90;
+const PUBLISH_DEBOUNCE_MS=5500;
+
+const $=s=>document.querySelector(s);
+const dot=(el,state)=>{ el.classList.remove('ok','warn','err'); if(state==='ok') el.classList.add('ok'); else if(state==='warn') el.classList.add('warn'); else if(state==='err') el.classList.add('err'); };
+const log=function(...args){ const el=$('#log'); const line=document.createElement('div'); line.textContent=args.map(a=>typeof a==='object'?JSON.stringify(a):String(a)).join(' '); el.appendChild(line); el.scrollTop=el.scrollHeight; console.log(...args);};
+
+let mqttClient=null, clientId=null, subscribed=false;
+
+function connectMQTT(){
+return new Promise((resolve,reject)=>{
+try{
+clientId=`web_${Math.floor(Math.random()*10000)}`;
+$('#cfg-client').textContent=clientId;
+log('MQTT connecting',clientId);
+mqttClient=new Paho.MQTT.Client(MQTT_HOST,Number(MQTT_PORT),MQTT_PATH,clientId);
+mqttClient.onConnectionLost=resp=>{ $('#mqtt-state').textContent='connection lost'; dot($('#dot-mqtt'),'err'); dot($('#dot-sub'),null); $('#sub-state').textContent='not subscribed'; subscribed=false; log('MQTT lost',resp);};
+mqttClient.onMessageArrived=msg=>{ dot($('#dot-loop'),'ok'); $('#rx-state').textContent=`${msg.destinationName}: ${msg.payloadString}`; log('MQTT RX',msg.destinationName,msg.payloadString);};
+const will=new Paho.MQTT.Message(JSON.stringify({clientId,status:'offline'}));
+will.destinationName=`${MQTT_TOPIC}/status`; will.retained=true; will.qos=0;
+mqttClient.connect({
+useSSL:true,timeout:20,keepAliveInterval:60,cleanSession:true,mqttVersion:4,willMessage:will,
+onSuccess:()=>{
+$('#mqtt-state').textContent='connected'; dot($('#dot-mqtt'),'ok'); log('MQTT connected ✅');
+const online=new Paho.MQTT.Message(JSON.stringify({clientId,status:'online',ts:Date.now()}));
+online.destinationName=`${MQTT_TOPIC}/status`; online.retained=true; online.qos=0; mqttClient.send(online);
+mqttClient.subscribe(MQTT_TOPIC,{qos:0});
+mqttClient.subscribe(`${MQTT_TOPIC}/#`,{qos:0});
+subscribed=true; dot($('#dot-sub'),'ok'); $('#sub-state').textContent=`subscribed to ${MQTT_TOPIC}/#`;
+resolve();
+}, onFailure:e=>{ $('#mqtt-state').textContent=`failed: ${e.errorMessage||'unknown'}`; dot($('#dot-mqtt'),'err'); log('MQTT failed ❌',e); reject(e);}
+});
+}catch(err){$('#mqtt-state').textContent='setup error'; dot($('#dot-mqtt'),'err'); log('MQTT setup error ❌',err); reject(err);}
+});
+}
+
+function safePublish(payload){ if(!mqttClient||!mqttClient.isConnected()){ log('Publish skipped (not connected)'); return false; } try{ const msg=new Paho.MQTT.Message(payload); msg.destinationName=MQTT_TOPIC; mqttClient.send(msg); log('MQTT TX',MQTT_TOPIC,payload); return true; } catch(e){ log('Publish error',e); return false;} }
+
+/*********************
+ * Teachable Machine
+ *********************/
+let model, webcam, labelContainer, maxPredictions;
+let lastSentAt=0, running=false;
+
+async function loadModel(){ $('#model-state').textContent='loading...'; dot($('#dot-model'),'warn'); const modelURL=TM_URL+'model.json', metadataURL=TM_URL+'metadata.json'; model=await tmImage.load(modelURL,metadataURL); maxPredictions=model.getTotalClasses(); $('#model-state').textContent=`ready (${maxPredictions} classes)`; dot($('#dot-model'),'ok'); }
+
+async function startCamera(facingMode){ $('#cam-state').textContent='requesting...'; dot($('#dot-cam'),'warn'); const size=Math.min(360,Math.max(224,Math.floor(window.innerWidth*0.6))); webcam=new tmImage.Webcam(size,size,false); try{ await webcam.setup({facingMode}); await webcam.play(); $('#webcam-container').innerHTML=''; $('#webcam-container').appendChild(webcam.canvas); $('#cam-state').textContent='streaming'; dot($('#dot-cam'),'ok'); } catch(e){ $('#cam-state').textContent=`error: ${e?.message||e}`; dot($('#dot-cam'),'err'); throw e;} }
+
+function buildLabels(){ labelContainer=$('#label-container'); labelContainer.innerHTML=''; for(let i=0;i<maxPredictions;i++){ const row=document.createElement('div'); row.className='bar'; const span=document.createElement('span'); span.textContent='-'; row.appendChild(span); labelContainer.appendChild(row);} }
+
+async function loop(){ if(!running) return; webcam.update(); await predict(); requestAnimationFrame(loop); }
+
+async function predict(){ const preds=await model.predict(webcam.canvas); for(let i=0;i<maxPredictions;i++){ const p=preds[i]; const row=labelContainer.children[i]; const perc=Math.round(p.probability*100); row.style.setProperty('--w',perc+'%'); row.firstChild.textContent=`${p.className}: ${p.probability.toFixed(2)}`; } let best=preds[0]; for(let i=1;i<preds.length;i++) if(preds[i].probability>best.probability) best=preds[i]; const now=Date.now(); if(best.probability>=CONF_THRESHOLD&&now-lastSentAt>=PUBLISH_DEBOUNCE_MS){ lastSentAt=now; const ok=safePublish(best.className); dot($('#dot-loop'),ok?'warn':'err'); }}
+
+/*********************
+ * Orchestration
+ *********************/
+async function startAll(facing){ running=false; await connectMQTT().catch(()=>{}); await loadModel(); await startCamera(facing); buildLabels(); running=true; loop(); }
+
+function stopAll(){ running=false; try{ if(webcam) webcam.stop();}catch{} $('#webcam-container').innerHTML=''; $('#label-container').innerHTML=''; $('#cam-state').textContent='stopped'; dot($('#dot-cam'),null); if(mqttClient&&mqttClient.isConnected()){ try{ const offline=new Paho.MQTT.Message(JSON.stringify({clientId,status:'offline',ts:Date.now()})); offline.destinationName=`${MQTT_TOPIC}/status`; offline.retained=true; mqttClient.send(offline);}catch{} try{mqttClient.disconnect();}catch{} } $('#mqtt-state').textContent='disconnected'; dot($('#dot-mqtt'),null); $('#sub-state').textContent='not subscribed'; dot($('#dot-sub'),null); }
+
+/*********************
+ * Events
+ *********************/
+$('#btn-start-back').onclick=()=>startAll('environment');
+$('#btn-start-front').onclick=()=>startAll('user');
+$('#btn-stop').onclick=()=>stopAll();
+$('#btn-test-pub').onclick=()=>safePublish('TEST:'+Date.now());
+$('#btn-clear-log').onclick=()=>{ $('#log').innerHTML=''; };
+$('#cfg-broker').textContent=`wss://${MQTT_HOST}:${MQTT_PORT}${MQTT_PATH}`;
+$('#cfg-topic').textContent=MQTT_TOPIC;
+</script>
+</body>
+</html>
+
+
+
+
